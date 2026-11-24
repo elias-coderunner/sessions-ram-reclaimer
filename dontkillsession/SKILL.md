@@ -29,9 +29,9 @@ Both files are optional. If missing, use the fallbacks:
 
 ### 2. Identify what to protect
 
-Resolve the user's intent into one or more entries. An entry is either a **session** (identified by a session UUID) or a **tmux** entry (identified by a tmux session name).
+Resolve the user's intent into one or more entries. An entry is either a session (identified by a session UUID) or a tmux entry (identified by a tmux session name).
 
-**Current session detection** (used for `/dontkillsession` with no target, "this one", "this session", etc.):
+Current session detection (used for `/dontkillsession` with no target, "this one", "this session", etc.):
 
 Walk up the process tree from your own shell, through `/proc/<pid>/status` → `PPid`, stopping when you find:
 
@@ -53,7 +53,7 @@ while [ "$pid" != "1" ] && [ -r "/proc/$pid/cmdline" ]; do
 done
 ```
 
-**Bulk time windows** (`today`, `this week`, `since Monday`, `last 3 days`, etc.):
+Bulk time windows (`today`, `this week`, `since Monday`, `last 3 days`, etc.):
 
 - Boundaries are computed in the configured timezone (from step 1). "Today" means from midnight in that timezone to now.
 - "Started" / "worked on" / "active" are all measured by the transcript file's modification time (last-message time). The reclaimer uses the same metric for idle; stay consistent.
@@ -62,7 +62,7 @@ done
 ### 3. Resolve the duration
 
 - `24h`, `2 days`, `30m`, `1 week`, `forever`, `until Friday`, `until 2026-12-10`, etc. Parse free-form. Compute `until` as an ISO-8601 timestamp with explicit `Z` suffix (`YYYY-MM-DDTHH:MM:SSZ`), or the literal string `never`.
-- **Never emit a naive datetime** (no `Z`, no `+HH:MM` offset). The helper and the reclaimer both reject naive values because their interpretation is ambiguous.
+- Never emit a naive datetime (no `Z`, no `+HH:MM` offset). The helper and the reclaimer both reject naive values because their interpretation is ambiguous.
 - If the user said nothing about duration, ask one question in their language: "For how long?"
 
 ### 4. Collisions: ask
@@ -73,7 +73,7 @@ For every entry you are about to write, check whether that session UUID (or tmux
 
 For a bulk request with many collisions, offer "apply the same choice to all remaining collisions" — do not interrogate the user N times in a row.
 
-**One `--on-collision` per helper invocation.** The helper applies a single collision mode to every `--add` it receives. To honor mixed per-entry choices, call the helper multiple times — once per group of entries that share the same chosen mode. Example: user says "replace for session A, extend for sessions B and C" → one invocation with `--on-collision replace --add A`, a second with `--on-collision extend --add B --add C`.
+One `--on-collision` per helper invocation. The helper applies a single collision mode to every `--add` it receives. To honor mixed per-entry choices, call the helper multiple times — once per group of entries that share the same chosen mode. Example: user says "replace for session A, extend for sessions B and C" → one invocation with `--on-collision replace --add A`, a second with `--on-collision extend --add B --add C`.
 
 ### 5. Write
 
@@ -88,8 +88,8 @@ Call the helper:
 ```
 
 Entry shapes:
-- `session` entries use **`id`** (the Claude session UUID).
-- `tmux` entries use **`name`** (the tmux session name).
+- `session` entries use `id` (the Claude session UUID).
+- `tmux` entries use `name` (the tmux session name).
 
 One `--add` per entry; multiple `--add` flags are allowed in one call. The helper handles the atomic locked read-append-write and is the only thing (besides the reclaimer's own pruning) that touches the file.
 

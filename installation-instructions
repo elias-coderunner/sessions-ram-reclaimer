@@ -4,9 +4,9 @@ How to install Sessions RAM Reclaimer on a Linux host, step by step. The result 
 
 Takes about five minutes.
 
-> **Platform:** Linux only. Relies on GNU `coreutils` (`stat -c %Y`) and the `/proc` filesystem. Does not work on macOS or BSD as-is.
+> Platform: Linux only. Relies on GNU `coreutils` (`stat -c %Y`) and the `/proc` filesystem. Does not work on macOS or BSD as-is.
 
-> **What else ships here:** this install covers the reclaimer itself. The repo also ships an optional Claude Code skill (`/dontkillsession`) that lets you protect sessions from inside Claude for a duration you choose. See the [Companion skill](#companion-skill-optional) section at the end of this document.
+> What else ships here: this install covers the reclaimer itself. The repo also ships an optional Claude Code skill (`/dontkillsession`) that lets you protect sessions from inside Claude for a duration you choose. See the [Companion skill](#companion-skill-optional) section at the end of this document.
 
 
 ## Placeholders used in this document
@@ -55,7 +55,7 @@ E.g. if the check printed `missing: pstree` and `missing: tmux`, run `sudo apt i
 
 ### Access and permissions
 
-- The reclaimer must run as **the same Linux user that owns the Claude Code sessions**. Detection reads `/proc/<pid>`; termination sends signals. Both need matching UID.
+- The reclaimer must run as the same Linux user that owns the Claude Code sessions. Detection reads `/proc/<pid>`; termination sends signals. Both need matching UID.
 - No root required.
 - No secrets file — the tool does not authenticate to anything. Everything it needs is local.
 - The install directory must be writable by `<user>`, because the log file (`activity-log/sessions-ram-reclaimer.log`) lands there by default.
@@ -105,7 +105,7 @@ The reclaimer reads seven environment variables. All have sensible defaults, so 
 | `DO_NOT_KILL_FILE`      | `<install-dir>/do-not-kill-sessions.json` | JSON file of sessions to protect. Populated by the `/dontkillsession` skill, or edited by hand. Override to share one exclusion list across multiple installs. |
 | `DRY_RUN`               | *unset*                                | Set to `1` for an ad-hoc preview run that reports what *would* be reaped without killing anything. Not for cron; use at the shell. |
 
-Where to put overrides: either **inline in the cron line** (see Step 3), or in a small **wrapper script** next to the reclaimer that exports the variables and then `exec`s the script. Inline is simpler for one or two overrides; a wrapper is cleaner for several.
+Where to put overrides: either inline in the cron line (see Step 3), or in a small wrapper script next to the reclaimer that exports the variables and then `exec`s the script. Inline is simpler for one or two overrides; a wrapper is cleaner for several.
 
 
 ## Step 3: Install the cron entry
@@ -118,7 +118,7 @@ Open `<user>`'s crontab:
 crontab -e
 ```
 
-Add one line. The default is **hourly, at minute 0**:
+Add one line. The default is hourly, at minute 0:
 
 ```
 0 * * * * <install-dir>/sessions-ram-reclaimer
@@ -171,11 +171,11 @@ You should see lines like:
 
 Fields:
 
-- **verification executed** — a real run (dry-runs print to the terminal only, nothing to log).
-- **N idle sessions detected** — how many sessions crossed `IDLE_THRESHOLD`.
-- **N killed** — how many were actually terminated.
-- **X MB of RAM reclaimed** — total resident memory freed. Replaced by `RAM reclaimed not captured` in the rare case where sessions were killed but `/proc/<pid>/status` couldn't be read in time to measure their RSS.
-- **N failed** (appears only if non-zero) — how many the kill signal didn't successfully terminate.
+- verification executed — a real run (dry-runs print to the terminal only, nothing to log).
+- N idle sessions detected — how many sessions crossed `IDLE_THRESHOLD`.
+- N killed — how many were actually terminated.
+- X MB of RAM reclaimed — total resident memory freed. Replaced by `RAM reclaimed not captured` in the rare case where sessions were killed but `/proc/<pid>/status` couldn't be read in time to measure their RSS.
+- N failed (appears only if non-zero) — how many the kill signal didn't successfully terminate.
 
 Additional log lines that may appear on runs that touch `do-not-kill-sessions.json`:
 
@@ -185,12 +185,12 @@ Additional log lines that may appear on runs that touch `do-not-kill-sessions.js
 
 ## When something goes wrong
 
-- **Cron doesn't fire** — confirm the cron daemon is running (`systemctl status cron` or `systemctl status crond`), and that `crontab -l` as `<user>` shows the entry you added.
-- **Script runs but reaps nothing, ever** — likely `CLAUDE_PROJECTS_DIR` points at the wrong directory, or `IDLE_THRESHOLD` is too large for your usage. Run with `DRY_RUN=1` and inspect; add `set -x` temporarily if you need visibility.
-- **`N failed` stays non-zero every run** — the kill signal isn't reaching the target process. Most common cause: cron is running the script as a user that does not own the Claude processes (so `kill` is permission-denied). Confirm with `ps -o user= -p <pid>` versus `whoami` inside the cron environment.
-- **First pass works, second pass (tmux) reaps nothing** — `tmux` isn't installed, or the `tmux` server is running under a different user than the reclaimer. Re-run the Prerequisites check.
-- **First pass works, second pass reaps less than expected** — `pstree` (`psmisc`) isn't installed, so the script falls back to the bare pane PID and may miss `claude` processes nested deeper in the pane's process tree. Install `psmisc`.
-- **Log grows unbounded** — the reclaimer does not rotate its own log. Pipe it through `logrotate`, or set `LOG` to a destination that handles rotation on its own.
+- Cron doesn't fire — confirm the cron daemon is running (`systemctl status cron` or `systemctl status crond`), and that `crontab -l` as `<user>` shows the entry you added.
+- Script runs but reaps nothing, ever — likely `CLAUDE_PROJECTS_DIR` points at the wrong directory, or `IDLE_THRESHOLD` is too large for your usage. Run with `DRY_RUN=1` and inspect; add `set -x` temporarily if you need visibility.
+- `N failed` stays non-zero every run — the kill signal isn't reaching the target process. Most common cause: cron is running the script as a user that does not own the Claude processes (so `kill` is permission-denied). Confirm with `ps -o user= -p <pid>` versus `whoami` inside the cron environment.
+- First pass works, second pass (tmux) reaps nothing — `tmux` isn't installed, or the `tmux` server is running under a different user than the reclaimer. Re-run the Prerequisites check.
+- First pass works, second pass reaps less than expected — `pstree` (`psmisc`) isn't installed, so the script falls back to the bare pane PID and may miss `claude` processes nested deeper in the pane's process tree. Install `psmisc`.
+- Log grows unbounded — the reclaimer does not rotate its own log. Pipe it through `logrotate`, or set `LOG` to a destination that handles rotation on its own.
 
 
 ## Companion skill (optional)

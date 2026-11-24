@@ -1,6 +1,6 @@
 # README - Sessions RAM Reclaimer
 
-*A cron-driven reaper that kills idle Claude Code sessions on a Linux host so their RAM goes back to the kernel, with a companion skill that lets you protect sessions you want kept alive.*
+A cron-driven reaper that kills idle Claude Code sessions on a Linux host so their RAM goes back to the kernel, with a companion skill that lets you protect sessions you want kept alive.
 
 
 
@@ -37,8 +37,8 @@ A companion Claude Code skill (`/dontkillsession`) lets you mark sessions as pro
 
 The one-shot bash script that does the reaping. It runs in two passes per invocation:
 
-- **Pass 1 — resumable sessions.** Walks `ps -eo pid,args` for every process whose command line contains `--resume=<uuid>`, extracts the UUID, locates the matching transcript under `$CLAUDE_PROJECTS_DIR` (default `$HOME/.claude/projects`), reads its mtime via `stat -c %Y`, and treats the pid as a candidate when `NOW - mtime` is at least `IDLE_THRESHOLD`. This covers sessions started from the Claude Desktop app, VS Code plugin, SSH terminal, Claude's web/mobile Remote Control, and any wrapper that uses the standard CLI.
-- **Pass 2 — bare `claude` under `tmux`.** Only runs if `tmux` is on `PATH`. Walks `tmux list-sessions`, uses each session's `session_activity` as the idle clock, pulls the first pane's `pane_pid`, expands it into the pane subtree via `pstree -p`, and reaps the first child whose argv0 matches `(^|/)claude( |$)` and has no `--resume=` anywhere. Covers persistent agents started by skills like `persistentagent` and hand-launched `tmux new 'claude ...'` sessions.
+- Pass 1 — resumable sessions. Walks `ps -eo pid,args` for every process whose command line contains `--resume=<uuid>`, extracts the UUID, locates the matching transcript under `$CLAUDE_PROJECTS_DIR` (default `$HOME/.claude/projects`), reads its mtime via `stat -c %Y`, and treats the pid as a candidate when `NOW - mtime` is at least `IDLE_THRESHOLD`. This covers sessions started from the Claude Desktop app, VS Code plugin, SSH terminal, Claude's web/mobile Remote Control, and any wrapper that uses the standard CLI.
+- Pass 2 — bare `claude` under `tmux`. Only runs if `tmux` is on `PATH`. Walks `tmux list-sessions`, uses each session's `session_activity` as the idle clock, pulls the first pane's `pane_pid`, expands it into the pane subtree via `pstree -p`, and reaps the first child whose argv0 matches `(^|/)claude( |$)` and has no `--resume=` anywhere. Covers persistent agents started by skills like `persistentagent` and hand-launched `tmux new 'claude ...'` sessions.
 
 Server/bridge daemons under `~/.claude/remote/srv/` and `claude -p` / print-mode processes match neither pass — they have no `--resume=` argument and do not run inside `tmux` — so they are implicitly protected. `claude -p` also exits on its own.
 

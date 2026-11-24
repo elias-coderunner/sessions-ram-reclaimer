@@ -43,8 +43,8 @@ You should see `SKILL.md`, `dont-kill-this-session`, `setup`, and this file (`in
 
 The script asks two questions:
 
-1. **Where is Sessions RAM Reclaimer installed?** When `setup` is run from `~/.claude/skills/dontkillsession/`, it cannot auto-detect the reclaimer's install directory (its own parent is `~/.claude/skills/`, not the reclaimer). The prompt shows no default — type the absolute path (e.g. `/home/<user>/sessions-ram-reclaimer`) and press Enter. If the path doesn't contain the reclaimer binary, `setup` warns and asks you to confirm.
-2. **What is your local timezone?** Used to interpret "today", "this week", "since Monday". Use an IANA name like `Europe/Lisbon` or `America/New_York`. Press Enter to accept the machine's detected timezone (`setup` reads it via `timedatectl` — an IANA name, not an abbreviation). The value you type (or the detected default) is validated against `/usr/share/zoneinfo/<name>`; an invalid name is rejected with a clear error and nothing is saved for timezone.
+1. Where is Sessions RAM Reclaimer installed? When `setup` is run from `~/.claude/skills/dontkillsession/`, it cannot auto-detect the reclaimer's install directory (its own parent is `~/.claude/skills/`, not the reclaimer). The prompt shows no default — type the absolute path (e.g. `/home/<user>/sessions-ram-reclaimer`) and press Enter. If the path doesn't contain the reclaimer binary, `setup` warns and asks you to confirm.
+2. What is your local timezone? Used to interpret "today", "this week", "since Monday". Use an IANA name like `Europe/Lisbon` or `America/New_York`. Press Enter to accept the machine's detected timezone (`setup` reads it via `timedatectl` — an IANA name, not an abbreviation). The value you type (or the detected default) is validated against `/usr/share/zoneinfo/<name>`; an invalid name is rejected with a clear error and nothing is saved for timezone.
 
 Setup writes:
 
@@ -80,10 +80,10 @@ Free form. If Claude is not sure what you mean, it asks one short question.
 
 ## When something goes wrong
 
-- **"I can't find the reclaimer"** — the install path in `~/.config/sessions-ram-reclaimer/path` is wrong. Re-run `setup`, or edit the file.
-- **Protection does not take effect** — the reclaimer only reads the file at the start of a run. Run `<install-dir>/sessions-ram-reclaimer` manually (or wait for the next cron tick) to apply the new exclusions.
-- **"Today" boundary feels off by a few hours** — the timezone file is missing or wrong. Re-run `setup` with the correct IANA name.
-- **Entry is in the file but the session was still killed** — the session's `until` has already passed (the reclaimer will prune expired entries silently), or the UUID does not match the actual running process. Verify with `cat <install-dir>/do-not-kill-sessions.json` and compare with `ps -ef | grep -- '--resume='`.
+- "I can't find the reclaimer" — the install path in `~/.config/sessions-ram-reclaimer/path` is wrong. Re-run `setup`, or edit the file.
+- Protection does not take effect — the reclaimer only reads the file at the start of a run. Run `<install-dir>/sessions-ram-reclaimer` manually (or wait for the next cron tick) to apply the new exclusions.
+- "Today" boundary feels off by a few hours — the timezone file is missing or wrong. Re-run `setup` with the correct IANA name.
+- Entry is in the file but the session was still killed — the session's `until` has already passed (the reclaimer will prune expired entries silently), or the UUID does not match the actual running process. Verify with `cat <install-dir>/do-not-kill-sessions.json` and compare with `ps -ef | grep -- '--resume='`.
 
 
 ## Uninstall
