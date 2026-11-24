@@ -70,8 +70,8 @@ Environment variables the script reads (defaults in the script itself):
 |-----------------------|-----------------------------------------------------------|----------------------------------------------------------------------|
 | `LOG`                 | `$SCRIPT_DIR/activity-log/sessions-ram-reclaimer.log`     | Where the per-run summary line is appended.                          |
 | `IDLE_THRESHOLD`      | `21600` (6 h, in seconds)                                 | Age past which a session becomes a reap candidate.                   |
-| `SKIP_SESSIONS`       | *empty*                                                   | Comma-separated session UUIDs the first pass must never kill.        |
-| `SKIP_TMUX`           | *empty*                                                   | Comma-separated tmux session names the second pass must never kill.  |
+| `SKIP_SESSIONS`       | empty                                                   | Comma-separated session UUIDs the first pass must never kill.        |
+| `SKIP_TMUX`           | empty                                                   | Comma-separated tmux session names the second pass must never kill.  |
 | `DO_NOT_KILL_FILE`    | `$SCRIPT_DIR/do-not-kill-sessions.json`                   | JSON exclusion list; expired entries are auto-pruned.                |
 | `DRY_RUN`             | `0`                                                       | `1` previews without killing and prints to stdout only.              |
 | `CLAUDE_PROJECTS_DIR` | `$HOME/.claude/projects`                                  | Where the first pass searches for `<uuid>.jsonl` transcripts.        |

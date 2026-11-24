@@ -10,7 +10,7 @@ A Claude Code skill that protects sessions from Sessions RAM Reclaimer. Install 
 - `<install-dir>` — the absolute path where the `sessions-ram-reclaimer/` directory lives on disk (the same `<install-dir>` used in the reclaimer's installation guide).
 
 
-## Step 1: Make the two executables executable *in the source tree*
+## Step 1: Make the two executables executable in the source tree
 
 Before copying anything, make sure `setup` and the helper are executable in `<install-dir>/dontkillsession/`. The skill, after being copied, calls the helper at its install-dir path — not in `~/.claude/skills/`. If the source helper lacks the executable bit, the skill will fail at runtime even if the copied helper has it.
 

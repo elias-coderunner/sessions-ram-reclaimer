@@ -98,12 +98,12 @@ The reclaimer reads seven environment variables. All have sensible defaults, so 
 | Variable                | Default                                | What it does                                                                                           |
 | ----------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `IDLE_THRESHOLD`        | `21600` (6 hours, in seconds)          | How long a session must sit untouched before it is eligible for reaping.                               |
-| `SKIP_SESSIONS`         | *empty*                                | Comma-separated Claude session UUIDs that must never be killed.                                        |
-| `SKIP_TMUX`             | *empty*                                | Comma-separated `tmux` session names that must never be killed.                                        |
+| `SKIP_SESSIONS`         | empty                                | Comma-separated Claude session UUIDs that must never be killed.                                        |
+| `SKIP_TMUX`             | empty                                | Comma-separated `tmux` session names that must never be killed.                                        |
 | `LOG`                   | `<install-dir>/activity-log/sessions-ram-reclaimer.log` | Where the per-run summary line is appended.                                                            |
 | `CLAUDE_PROJECTS_DIR`   | `$HOME/.claude/projects`               | Where Claude Code keeps session transcripts. Override only if yours live somewhere else.               |
 | `DO_NOT_KILL_FILE`      | `<install-dir>/do-not-kill-sessions.json` | JSON file of sessions to protect. Populated by the `/dontkillsession` skill, or edited by hand. Override to share one exclusion list across multiple installs. |
-| `DRY_RUN`               | *unset*                                | Set to `1` for an ad-hoc preview run that reports what *would* be reaped without killing anything. Not for cron; use at the shell. |
+| `DRY_RUN`               | unset                                | Set to `1` for an ad-hoc preview run that reports what would be reaped without killing anything. Not for cron; use at the shell. |
 
 Where to put overrides: either inline in the cron line (see Step 3), or in a small wrapper script next to the reclaimer that exports the variables and then `exec`s the script. Inline is simpler for one or two overrides; a wrapper is cleaner for several.
 
