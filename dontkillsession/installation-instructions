@@ -1,0 +1,96 @@
+# /dontkillsession — installation instructions
+
+A Claude Code skill that protects sessions from Sessions RAM Reclaimer. Install takes a couple of minutes and runs no services — the skill writes one file (`do-not-kill-sessions.json` in the reclaimer's install directory), and the reclaimer reads it on its hourly tick.
+
+> This guide assumes Sessions RAM Reclaimer is already installed and working. If not, start with `../installation-instructions` in the repository root.
+
+
+## Placeholders used in this document
+
+- `<install-dir>` — the absolute path where the `sessions-ram-reclaimer/` directory lives on disk (the same `<install-dir>` used in the reclaimer's installation guide).
+
+
+## Step 1: Make the two executables executable *in the source tree*
+
+Before copying anything, make sure `setup` and the helper are executable in `<install-dir>/dontkillsession/`. The skill, after being copied, calls the helper at its install-dir path — not in `~/.claude/skills/`. If the source helper lacks the executable bit, the skill will fail at runtime even if the copied helper has it.
+
+```
+chmod +x <install-dir>/dontkillsession/setup <install-dir>/dontkillsession/dont-kill-this-session
+```
+
+## Step 2: Copy the skill into Claude Code's skills directory
+
+Claude Code looks for skills under `~/.claude/skills/`. One folder per skill, named after the slash command. Copy the folder in with the exact name `dontkillsession` — `cp -r` preserves the executable bits you just set:
+
+```
+cp -r <install-dir>/dontkillsession ~/.claude/skills/dontkillsession
+```
+
+Confirm:
+
+```
+ls ~/.claude/skills/dontkillsession
+```
+
+You should see `SKILL.md`, `dont-kill-this-session`, `setup`, and this file (`installation-instructions`).
+
+
+## Step 3: Run the one-time setup
+
+```
+~/.claude/skills/dontkillsession/setup
+```
+
+The script asks two questions:
+
+1. **Where is Sessions RAM Reclaimer installed?** When `setup` is run from `~/.claude/skills/dontkillsession/`, it cannot auto-detect the reclaimer's install directory (its own parent is `~/.claude/skills/`, not the reclaimer). The prompt shows no default — type the absolute path (e.g. `/home/<user>/sessions-ram-reclaimer`) and press Enter. If the path doesn't contain the reclaimer binary, `setup` warns and asks you to confirm.
+2. **What is your local timezone?** Used to interpret "today", "this week", "since Monday". Use an IANA name like `Europe/Lisbon` or `America/New_York`. Press Enter to accept the machine's detected timezone (`setup` reads it via `timedatectl` — an IANA name, not an abbreviation). The value you type (or the detected default) is validated against `/usr/share/zoneinfo/<name>`; an invalid name is rejected with a clear error and nothing is saved for timezone.
+
+Setup writes:
+
+- `~/.config/sessions-ram-reclaimer/path` — one line, the install directory. Always written.
+- `~/.config/sessions-ram-reclaimer/timezone` — one line, the IANA timezone. Written when either the user types a valid IANA name or accepts the machine default. Absent when the user typed nothing and no valid machine default was detected.
+
+Both files are plain text. You can re-run `setup` any time to change them, or edit by hand.
+
+
+## Step 4: Use the skill
+
+Inside any Claude Code session, type `/dontkillsession` followed by whatever you want in plain language. Examples:
+
+- `/dontkillsession` — protects the current session; Claude will ask how long.
+- `/dontkillsession 24h` — protects the current session for 24 hours.
+- `/dontkillsession until Friday` — protects the current session until next Friday.
+- `/dontkillsession never` — permanent protection of the current session.
+- `/dontkillsession today` — protects every session with activity today; Claude will ask for how long.
+- `/dontkillsession this week for 1 week` — protects every session active in the last week, for a week.
+- `/dontkillsession the agent called watcher-1 forever` — protects the tmux session `watcher-1`, permanently.
+
+Free form. If Claude is not sure what you mean, it asks one short question.
+
+
+## How it works, briefly
+
+1. Claude parses your request, works out which sessions to protect (by UUID, or by tmux session name) and until when.
+2. If a session is already protected, Claude asks whether to replace, extend, or keep the existing entry.
+3. The skill calls `dont-kill-this-session` (the helper in this folder) to append entries atomically to `<install-dir>/do-not-kill-sessions.json`.
+4. On its next scheduled run, Sessions RAM Reclaimer reads that file and skips any session in it whose `until` has not passed.
+5. The reclaimer also removes expired entries from the file on its own; the skill never has to clean up.
+
+
+## When something goes wrong
+
+- **"I can't find the reclaimer"** — the install path in `~/.config/sessions-ram-reclaimer/path` is wrong. Re-run `setup`, or edit the file.
+- **Protection does not take effect** — the reclaimer only reads the file at the start of a run. Run `<install-dir>/sessions-ram-reclaimer` manually (or wait for the next cron tick) to apply the new exclusions.
+- **"Today" boundary feels off by a few hours** — the timezone file is missing or wrong. Re-run `setup` with the correct IANA name.
+- **Entry is in the file but the session was still killed** — the session's `until` has already passed (the reclaimer will prune expired entries silently), or the UUID does not match the actual running process. Verify with `cat <install-dir>/do-not-kill-sessions.json` and compare with `ps -ef | grep -- '--resume='`.
+
+
+## Uninstall
+
+```
+rm -rf ~/.claude/skills/dontkillsession
+rm -rf ~/.config/sessions-ram-reclaimer/
+```
+
+The reclaimer itself keeps working. `do-not-kill-sessions.json` is left in place; delete it manually if you want the reclaimer to stop honoring the entries you previously added.

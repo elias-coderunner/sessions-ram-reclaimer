@@ -1,0 +1,24 @@
+# Index
+
+Top-level layout of this directory. Each entry is one click away.
+
+## Files at root
+
+- [Index](Index) - this file
+- [AGENTS.md](AGENTS.md) - orientation for AI agents working in this repo (routing table + house rules)
+- [README](README) - what Sessions RAM Reclaimer is, the problem it solves, and how the pieces fit together
+- [installation-instructions](installation-instructions) - step-by-step guide for installing the reclaimer on a Linux host
+- [sessions-ram-reclaimer](sessions-ram-reclaimer) - the hourly reaper script that stops idle Claude Code sessions
+- [.gitignore](.gitignore) - excludes runtime log contents and the per-install protection list
+
+## Directories
+
+- [activity-log/](activity-log/) - runtime log file (`sessions-ram-reclaimer.log`)
+- [dontkillsession/](dontkillsession/) - the `/dontkillsession` Claude Code skill that writes entries to the reclaimer's protection list
+  - `SKILL.md` - skill manifest and instructions for Claude
+  - `dont-kill-this-session` - Python helper that writes entries to `do-not-kill-sessions.json`
+  - `setup` - one-time interactive setup recording the install path and timezone
+  - `installation-instructions` - step-by-step guide for installing the skill
+- [script-internals/](script-internals/) - per-mechanism technical deep-dives needed to understand how the scripts work when editing them; not required for installing, operating, or running the solution
+  - `sessions-ram-reclaimer.md` - technical details of the reaper script (passes, detection, config, logging)
+  - `dont-kill-this-session.md` - technical details of the skill's Python helper (CLI, schema, collisions, concurrency)

@@ -1,0 +1,203 @@
+# README - Sessions RAM Reclaimer
+
+*A cron-driven reaper that kills idle Claude Code sessions on a Linux host so their RAM goes back to the kernel, with a companion skill that lets you protect sessions you want kept alive.*
+
+
+
+# Table of Contents
+
+1. Problem Addressed
+2. Solution Composition
+3. How the pieces fit together
+4. How to install
+5. Dependencies
+
+
+
+# Problem Addressed
+
+Claude Code sessions linger. Every open conversation, whether you launched it from the Claude Desktop app, a terminal, an IDE plugin, or a `tmux`-hosted persistent agent, runs as a long-lived process on the box it was started on. Each one holds hundreds of megabytes of resident memory — model context, tool state, open file handles, MCP connections. On a workstation you might close them by hand. On a VPS you probably forget. Over a week, a working machine ends up pinned under several gigabytes of RAM that nothing is actually using.
+
+The result: fewer parallel sessions, slower new launches, and eventually the host paging or killing things under memory pressure. On a small VPS this hits hard and silently.
+
+If you want the RAM back without having to remember to close sessions by hand, something has to notice which ones have gone idle and stop them for you — while leaving alone the sessions you are still using, the always-on plumbing that keeps the Claude Desktop app and phone connected to the host, and anything you have explicitly asked to keep.
+
+
+
+# Solution
+
+The reclaimer runs on a schedule (cron, hourly by default) and reaps sessions that have been idle longer than a configurable threshold. "Idle" is measured against the session's transcript file for resumable Claude Code sessions, and against `tmux`'s own `session_activity` timestamp for bare `claude` processes hosted inside `tmux`. An active session is never touched.
+
+Closing a session here means killing the running process. For resumable sessions, the on-disk transcript is preserved and the conversation can be reopened from the Claude Desktop app, mobile, or CLI exactly where it left off. RAM goes back to the kernel immediately; the conversation waits on disk until needed again. Bare `tmux`-hosted sessions have no transcript to resume from — killing them is terminal for that session's state.
+
+A companion Claude Code skill (`/dontkillsession`) lets you mark sessions as protected from inside Claude itself, writing to a shared JSON exclusion list the reaper consults on each run.
+
+
+## sessions-ram-reclaimer — the reaper script
+
+The one-shot bash script that does the reaping. It runs in two passes per invocation:
+
+- **Pass 1 — resumable sessions.** Walks `ps -eo pid,args` for every process whose command line contains `--resume=<uuid>`, extracts the UUID, locates the matching transcript under `$CLAUDE_PROJECTS_DIR` (default `$HOME/.claude/projects`), reads its mtime via `stat -c %Y`, and treats the pid as a candidate when `NOW - mtime` is at least `IDLE_THRESHOLD`. This covers sessions started from the Claude Desktop app, VS Code plugin, SSH terminal, Claude's web/mobile Remote Control, and any wrapper that uses the standard CLI.
+- **Pass 2 — bare `claude` under `tmux`.** Only runs if `tmux` is on `PATH`. Walks `tmux list-sessions`, uses each session's `session_activity` as the idle clock, pulls the first pane's `pane_pid`, expands it into the pane subtree via `pstree -p`, and reaps the first child whose argv0 matches `(^|/)claude( |$)` and has no `--resume=` anywhere. Covers persistent agents started by skills like `persistentagent` and hand-launched `tmux new 'claude ...'` sessions.
+
+Server/bridge daemons under `~/.claude/remote/srv/` and `claude -p` / print-mode processes match neither pass — they have no `--resume=` argument and do not run inside `tmux` — so they are implicitly protected. `claude -p` also exits on its own.
+
+For each candidate: `VmRSS` is read from `/proc/<pid>/status` before killing, the script sends `SIGTERM`, waits up to 5 seconds, then `SIGKILL` if the pid is still alive. For a tmux candidate, `tmux kill-session` goes first, with a `SIGTERM`/`SIGKILL` fallback aimed at the discovered `claude` pid, and the stale `/tmp/tmux-<name>.pipe` is removed.
+
+One summary line goes to the log per real run. `DRY_RUN=1` prints a preview to stdout and does not touch the log — the log is an audit trail of actions taken, and a dry run takes none.
+
+Protection comes from three places, all merged into the per-run skip lists before the passes run: `SKIP_SESSIONS` (comma-separated session UUIDs), `SKIP_TMUX` (comma-separated tmux session names), and unexpired entries in the JSON exclusion list at `DO_NOT_KILL_FILE`.
+
+- To read implementation details, see [script-internals/sessions-ram-reclaimer.md](script-internals/sessions-ram-reclaimer.md).
+- path: sessions-ram-reclaimer/sessions-ram-reclaimer
+- log: sessions-ram-reclaimer/activity-log/sessions-ram-reclaimer.log
+- runs on a cron schedule you install (hourly at minute 0 by default)
+
+
+## dontkillsession/ — the companion skill
+
+A Claude Code skill shipped alongside the reaper in `./dontkillsession/`. It lets you protect sessions from inside Claude itself in plain language: `/dontkillsession 24h`, `/dontkillsession today`, `/dontkillsession until Friday`, `/dontkillsession never`, `/dontkillsession the agent called watcher-1 forever`. The skill parses your intent, resolves which sessions you mean (the current one, a bulk time window, or a named tmux session), computes an `until` as ISO-8601 UTC with an explicit `Z` suffix (or the literal `never`), asks what to do on collisions with entries already in the file, and calls the helper to write.
+
+Current-session detection walks up the process tree from the shell's `PPID` through `/proc/<pid>/status`, preferring a `--resume=<uuid>` match on an ancestor's cmdline, falling back to `tmux display-message -p '#S'` when `$TMUX` is set. Bulk windows like "today" or "this week" are computed in the skill's configured timezone and matched against transcript mtimes under `$CLAUDE_PROJECTS_DIR` — the same metric the reclaimer uses for idle.
+
+The reclaimer works fine without the skill; the skill is a convenience layer, not a requirement. Protecting sessions without it is done via `SKIP_SESSIONS`, `SKIP_TMUX`, or by hand-editing the JSON file.
+
+- path: sessions-ram-reclaimer/dontkillsession/
+- install guide: [dontkillsession/installation-instructions](dontkillsession/installation-instructions)
+- the skill's manifest and intent-resolution contract: [dontkillsession/SKILL.md](dontkillsession/SKILL.md)
+
+
+## dontkillsession/dont-kill-this-session — the skill's atomic writer
+
+The Python helper the skill calls once it has resolved your request into concrete entries. The helper itself does not interpret natural language; its job is to take one or more validated entries and append them to `do-not-kill-sessions.json` safely.
+
+CLI shape:
+
+```
+dont-kill-this-session --file <path> [--on-collision replace|extend|keep] --add <json> [--add <json> ...]
+```
+
+Each `--add` is one JSON object describing one entry — either `{"type":"session","id":"<uuid>","until":"<iso-or-never>","reason":"..."}` or `{"type":"tmux","name":"<name>","until":"<iso-or-never>","reason":"..."}`. The composite key used for collision detection is `(type, id)` for sessions and `(type, name)` for tmux entries.
+
+`--on-collision` applies a single mode to every `--add` in one invocation: `replace` (default) overwrites the existing entry at the same key, `extend` keeps whichever `until` is longer (with `"never"` beating any timestamp), `keep` drops the incoming entry. To honor mixed per-entry choices from the user, the skill calls the helper more than once.
+
+Every `--add` value is validated before the lock is taken or the file is touched. An `until` without an explicit `Z` or `+HH:MM` offset is rejected on purpose — the reclaimer rejects naive datetimes on the read side too, so helper and reaper cannot disagree on what the string means. Bad input exits `2` and the file is not modified.
+
+Concurrency: each invocation opens `<file>.lock`, takes an exclusive `fcntl.flock` on it, reads and rewrites `--file` under that lock, then releases. The rewrite is atomic via `tempfile.mkstemp` + `os.replace`, so a reader sees either the complete old contents or the complete new contents, never a partial write.
+
+- To read implementation details, see [script-internals/dont-kill-this-session.md](script-internals/dont-kill-this-session.md).
+- path: sessions-ram-reclaimer/dontkillsession/dont-kill-this-session
+- called by: the `/dontkillsession` skill (not run by you directly)
+
+
+## dontkillsession/SKILL.md — the skill's manifest
+
+The skill's front-matter and instruction body. Claude Code reads it when you type `/dontkillsession` inside a session. It carries the `name` and `description` the skill is registered under, and the prose that tells Claude how to read the two install-config files, how to detect the current session, how to resolve bulk time windows, how to compute `until` strings, how to ask about collisions, and how to invoke the helper.
+
+This file is where to look if you want to change what the skill accepts or how it resolves intent.
+
+- path: sessions-ram-reclaimer/dontkillsession/SKILL.md
+
+
+## dontkillsession/setup — the skill's one-time config
+
+A small script the skill user runs once after copying the skill into `~/.claude/skills/dontkillsession/`. It asks two questions and writes the answers to `~/.config/sessions-ram-reclaimer/`:
+
+1. Where Sessions RAM Reclaimer is installed (the absolute `<install-dir>` path). If the path doesn't contain the reclaimer binary, setup warns and asks you to confirm.
+2. The local IANA timezone, used to interpret "today", "this week", "since Monday". Press Enter to accept the machine's detected timezone (read via `timedatectl`, which returns an IANA name, not an abbreviation). The value is validated against `/usr/share/zoneinfo/<name>`; an invalid name is rejected and nothing is saved for timezone.
+
+You can re-run `setup` any time to change the answers, or edit the two files by hand.
+
+- path: sessions-ram-reclaimer/dontkillsession/setup
+- writes: `~/.config/sessions-ram-reclaimer/path`, `~/.config/sessions-ram-reclaimer/timezone`
+
+
+## do-not-kill-sessions.json — the shared exclusion list
+
+A JSON array of entries both the reaper and the skill agree on. Each entry is a dict with a `type` (`"session"` or `"tmux"`), the matching identifier (`id` for sessions, `name` for tmux), an `until` (either the literal `"never"` or an ISO-8601 timestamp with an explicit `Z` or `+HH:MM` offset), and an optional free-text `reason`.
+
+The skill (via its helper) is the only sanctioned writer. The reaper is the only pruner: on each run, `load_exclusions` reads the file, keeps only well-formed entries whose `until` is `"never"` or parses as a timezone-aware ISO-8601 in the future, and atomically rewrites the file if anything was dropped. So the skill never has to clean up expired entries, and a broken entry does not persist across runs.
+
+Both readers and writers serialize via `fcntl.LOCK_EX` on a sidecar `<file>.lock`. If the top-level JSON cannot be parsed at all, the reaper logs one error line and the run continues using only the env-var protection lists (`SKIP_SESSIONS`, `SKIP_TMUX`).
+
+You can also edit the file by hand — the reaper does not care who wrote it, as long as entries are well-formed.
+
+- path: sessions-ram-reclaimer/do-not-kill-sessions.json (default; override with `DO_NOT_KILL_FILE`)
+- written by: `dontkillsession/dont-kill-this-session`
+- pruned by: `sessions-ram-reclaimer` on each run
+
+
+## activity-log/sessions-ram-reclaimer.log — the reaper's log
+
+One summary line per real run, appended to the log:
+
+```
+2026-11-24 19:03:53  verification executed, 2 idle sessions detected, 2 killed, 531 MB of RAM reclaimed
+```
+
+Fields are timestamp, the literal `verification executed`, `<N> idle sessions detected`, `<N> killed`, and a memory phrase — either `<X> MB of RAM reclaimed` / `<X.Y> GB of RAM reclaimed`, or `RAM reclaimed not captured` in the rare case where sessions were killed but `/proc/<pid>/status` couldn't be read in time to measure their RSS. `, <N> failed` is appended only when the kill signal didn't successfully terminate something.
+
+Two additional lines appear only on runs that touch the exclusion file:
+
+- `pruned <N> expired/malformed entry(ies) from <path>` — informational.
+- `do-not-kill-sessions file <path> could not be parsed, ignoring` — one error line; the run continues with env-var lists only.
+
+`DRY_RUN=1` writes nothing to the log; the preview goes to stdout.
+
+The reaper does not rotate its own log. Pipe it through `logrotate`, or set `LOG` to a destination that handles rotation on its own.
+
+- path: sessions-ram-reclaimer/activity-log/sessions-ram-reclaimer.log (default; override with `LOG`)
+
+
+## ~/.config/sessions-ram-reclaimer/{path,timezone} — the skill's config files
+
+Two one-line plain-text files written by `dontkillsession/setup`:
+
+- `path` — the install directory of the reclaimer (where `do-not-kill-sessions.json` lives). Always written. If missing at skill-run time, the skill asks you where the reclaimer is installed and offers to run `setup` to save the answer.
+- `timezone` — one IANA timezone name (e.g. `Europe/Lisbon`). Written when you type a valid IANA name or accept the machine default. Absent when you typed nothing and no valid machine default was detected. If missing at skill-run time, the skill tries `timedatectl show -p Timezone --value`, and falls back to `UTC` only if that is unavailable too (mentioning the fallback once in the reply so you know "today" is being computed in UTC).
+
+You can re-run `setup` to change either, or edit by hand.
+
+- path: ~/.config/sessions-ram-reclaimer/path
+- path: ~/.config/sessions-ram-reclaimer/timezone
+- written by: `dontkillsession/setup`
+
+
+
+# How the pieces fit together
+
+Cron fires the reaper on the schedule you installed. On each tick, the reaper first loads `do-not-kill-sessions.json` under a flock, merges its unexpired entries into the env-var skip lists (`SKIP_SESSIONS`, `SKIP_TMUX`), and atomically rewrites the file if any expired or malformed entries were dropped. Then it runs its two passes — resumable sessions keyed off transcript mtime, bare `claude` under `tmux` keyed off `session_activity` — skipping any pid whose UUID or tmux name is in the merged skip lists, and killing the rest. One summary line goes to the log.
+
+The `/dontkillsession` skill writes into the same `do-not-kill-sessions.json` the reaper reads. When you invoke it, Claude resolves your plain-language request into entries (a current-session UUID, bulk UUIDs from a time window of transcripts, a tmux session name), asks about collisions, and calls `dont-kill-this-session` to append them atomically under the same flock. Nothing in the skill's path talks to the reaper directly; the file is the only contact point.
+
+The skill learns where to write — and what timezone to compute "today" in — from the two files `dontkillsession/setup` writes under `~/.config/sessions-ram-reclaimer/`. The reaper never reads those; they are the skill's config alone.
+
+
+
+# How to install
+
+The full step-by-step installation guide for the reaper lives at `sessions-ram-reclaimer/installation-instructions`.
+
+It covers the four steps for getting the reclaimer running on a new Linux host:
+
+1. placing the files
+2. (optional) customizing the environment variables
+3. installing the cron entry
+4. verifying the installation
+
+Prerequisites, troubleshooting pointers, and an uninstall procedure are documented there as well.
+
+The companion skill has its own guide at `sessions-ram-reclaimer/dontkillsession/installation-instructions`, which covers making the two executables executable in the source tree, copying the skill folder into `~/.claude/skills/dontkillsession/`, and running `setup` once to answer the install-dir and timezone questions.
+
+
+
+# Dependencies
+
+The reclaimer is a plain `bash` script. Runs on Linux (relies on `/proc`). Verified on Debian / Ubuntu VPSes. Does not work on macOS or BSD as-is.
+
+- `bash` (any modern version)
+- GNU `coreutils` — uses `stat -c %Y` (not portable to BSD/macOS without GNU coreutils)
+- `python3` — parses the `do-not-kill-sessions.json` file. Pre-installed on standard Debian/Ubuntu; may be missing on minimal container images.
+- `psmisc` — provides `pstree`, used by the second pass to walk tmux pane process trees
+- `tmux` — optional; required only if you want the second pass to reap `tmux`-hosted Claude sessions
+- `cron` — any Vixie-compatible cron daemon

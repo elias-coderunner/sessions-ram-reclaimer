@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# Hourly reaper for Claude Code sessions whose transcript has been idle for 6+ hours.
+# Does NOT touch:
+#   - `claude -p` / print-mode processes (they exit on their own).
+#   - server/bridge daemons under ~/.claude/remote/srv/ (no --resume arg).
+# Detection: every Claude Code session process has `--resume=<uuid>` in its cmdline;
+#   that uuid names its transcript file under ~/.claude/projects/<project>/<uuid>.jsonl.
+# Idle = transcript file mtime older than IDLE_THRESHOLD seconds.
+# DRY_RUN=1 previews without killing.
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+: "${LOG:=$SCRIPT_DIR/activity-log/sessions-ram-reclaimer.log}"
+: "${IDLE_THRESHOLD:=21600}"   # seconds; default 6 hours
+: "${SKIP_SESSIONS:=}"          # comma-separated session UUIDs to protect
+: "${SKIP_TMUX:=}"              # comma-separated tmux session names to protect
+: "${DO_NOT_KILL_FILE:=$SCRIPT_DIR/do-not-kill-sessions.json}"   # JSON list of entries the /dontkillsession skill writes
+DRY=${DRY_RUN:-0}
+NOW=$(date +%s)
+DETECTED=0
+KILLED=0
+FAILED=0
+RECLAIMED_KB=0
+
+# Grab RSS (resident set size) of a pid in KB from /proc; 0 if unavailable.
+rss_of() {
+    awk '/^VmRSS:/ {print $2; exit}' "/proc/$1/status" 2>/dev/null || echo 0
+}
+
+# Format KB count as human-readable: "355 MB" or "1.2 GB".
+format_mem() {
+    local kb=$1
+    local mb=$(( kb / 1024 ))
+    if [ "$mb" -lt 1024 ]; then
+        printf '%d MB' "$mb"
+    else
+        awk -v kb="$kb" 'BEGIN { printf "%.1f GB", kb/1048576 }'
+    fi
+}
+
+CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+# Combined protection lists (env-provided SKIP_* plus unexpired entries from DO_NOT_KILL_FILE).
+EXCLUDED_SIDS=$SKIP_SESSIONS
+EXCLUDED_TMUX=$SKIP_TMUX
+
+# Load unexpired entries from DO_NOT_KILL_FILE (if it exists) and merge into EXCLUDED_SIDS / EXCLUDED_TMUX.
+# Also prunes expired entries from the file, atomically, so the skill never has to deal with cleanup.
+# File format: JSON array of {type: "session"|"tmux", id|name: "...", until: ISO-8601 UTC or "never", reason?: "..."}.
+# Malformed file: log one error line and fall through to env-only lists.
+load_exclusions() {
+    [ -r "$DO_NOT_KILL_FILE" ] || return 0
+    local out file_sids file_tmux pruned
+    out=$(python3 - "$DO_NOT_KILL_FILE" "$NOW" 2>/dev/null <<'PY'
+import fcntl, json, os, sys, tempfile
+from datetime import datetime
+path, now = sys.argv[1], int(sys.argv[2])
+# Serialize with the /dontkillsession helper so prune and append don't race.
+lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_WRONLY, 0o600)
+fcntl.flock(lock_fd, fcntl.LOCK_EX)
+try:
+    try:
+        with open(path) as f:
+            entries = json.load(f)
+        if not isinstance(entries, list):
+            raise ValueError("top level must be a list")
+    except Exception:
+        sys.exit(1)
+    sids, names, kept = [], [], []
+    dropped = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            dropped += 1
+            continue
+        until = e.get("until", "")
+        if until != "never":
+            try:
+                dt = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+            except Exception:
+                dropped += 1
+                continue
+            # Reject naive datetimes so helper and reclaimer agree on expiry. The helper
+            # rejects them on write, so a naive value here means a hand-edited file.
+            if dt.tzinfo is None:
+                dropped += 1
+                continue
+            if dt.timestamp() <= now:
+                dropped += 1
+                continue
+        t = e.get("type")
+        if t == "session" and e.get("id"):
+            sids.append(str(e["id"]))
+            kept.append(e)
+        elif t == "tmux" and e.get("name"):
+            names.append(str(e["name"]))
+            kept.append(e)
+        else:
+            dropped += 1
+    # Prune expired/malformed entries, atomically.
+    if dropped > 0:
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".do-not-kill-sessions.", suffix=".json.tmp", dir=d)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(kept, f, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+        except Exception:
+            try: os.unlink(tmp)
+            except Exception: pass
+    print(",".join(sids))
+    print(",".join(names))
+    print(dropped)
+finally:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+PY
+)
+    if [ $? -ne 0 ]; then
+        printf '%s  do-not-kill-sessions file %s could not be parsed, ignoring\n\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$DO_NOT_KILL_FILE" >> "$LOG"
+        return 0
+    fi
+    file_sids=$(printf '%s\n' "$out" | sed -n '1p')
+    file_tmux=$(printf '%s\n' "$out" | sed -n '2p')
+    pruned=$(printf '%s\n' "$out" | sed -n '3p')
+    [ -n "$file_sids" ] && EXCLUDED_SIDS="${EXCLUDED_SIDS:+$EXCLUDED_SIDS,}$file_sids"
+    [ -n "$file_tmux" ] && EXCLUDED_TMUX="${EXCLUDED_TMUX:+$EXCLUDED_TMUX,}$file_tmux"
+    if [ -n "$pruned" ] && [ "$pruned" -gt 0 ] 2>/dev/null; then
+        printf '%s  pruned %s expired/malformed entry(ies) from %s\n\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$pruned" "$DO_NOT_KILL_FILE" >> "$LOG"
+    fi
+}
+
+load_exclusions
+
+is_sid_skipped() {
+    local sid=$1
+    [ -z "$EXCLUDED_SIDS" ] && return 1
+    case ",$EXCLUDED_SIDS," in *",$sid,"*) return 0 ;; esac
+    return 1
+}
+
+is_tmux_skipped() {
+    local name=$1
+    [ -z "$EXCLUDED_TMUX" ] && return 1
+    case ",$EXCLUDED_TMUX," in *",$name,"*) return 0 ;; esac
+    return 1
+}
+
+while read -r pid cmd; do
+    sid=$(printf '%s' "$cmd" | grep -oE -- '--resume=[0-9a-f-]{36}' | head -1 | cut -d= -f2)
+    [ -z "$sid" ] && continue
+    is_sid_skipped "$sid" && continue
+
+    transcript=$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 3 -name "${sid}.jsonl" -print -quit 2>/dev/null)
+    [ -z "$transcript" ] || [ ! -f "$transcript" ] && continue
+
+    mtime=$(stat -c %Y "$transcript" 2>/dev/null) || continue
+    idle=$((NOW - mtime))
+
+    [ "$idle" -lt "$IDLE_THRESHOLD" ] && continue
+
+    DETECTED=$((DETECTED + 1))
+    rss=$(rss_of "$pid")
+    rss=${rss:-0}
+
+    if [ "$DRY" = 1 ]; then
+        RECLAIMED_KB=$((RECLAIMED_KB + rss))
+        continue
+    fi
+
+    kill -TERM "$pid" 2>/dev/null
+    for _ in 1 2 3 4 5; do
+        [ -d "/proc/$pid" ] || break
+        sleep 1
+    done
+    if [ -d "/proc/$pid" ]; then
+        kill -KILL "$pid" 2>/dev/null
+        sleep 1
+    fi
+
+    if [ -d "/proc/$pid" ]; then
+        FAILED=$((FAILED + 1))
+    else
+        KILLED=$((KILLED + 1))
+        RECLAIMED_KB=$((RECLAIMED_KB + rss))
+    fi
+done < <(ps -eo pid,args --no-headers | grep -- '--resume=' | grep -v grep)
+
+# Second pass: bare `claude` processes under tmux (e.g. launched by the persistentagent
+# skill as `tmux new-session -d -s <name> 'claude --dangerously-skip-permissions'`).
+# These have no --resume arg, so no transcript file; use tmux's own session_activity.
+if command -v tmux >/dev/null 2>&1; then
+    while IFS=' ' read -r sname sactivity; do
+        [ -z "$sname" ] && continue
+        is_tmux_skipped "$sname" && continue
+        idle=$((NOW - sactivity))
+        [ "$idle" -lt "$IDLE_THRESHOLD" ] && continue
+
+        # Find the root pane pid of this session's first window, then walk down
+        # to see if a `claude` process (without --resume) is running in it.
+        ppid=$(tmux list-panes -t "$sname" -F '#{pane_pid}' 2>/dev/null | head -1)
+        [ -z "$ppid" ] && continue
+
+        # Collect candidate pids: the pane pid plus its descendants.
+        pids=$(pstree -p "$ppid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()')
+        [ -z "$pids" ] && pids="$ppid"
+
+        cpid=""
+        for p in $pids; do
+            pargs=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+            # must look like a claude CLI invocation, with no --resume anywhere
+            if printf '%s' "$pargs" | grep -qE '(^|/)claude( |$)' && \
+               ! printf '%s' "$pargs" | grep -q -- '--resume='; then
+                cpid=$p
+                break
+            fi
+        done
+        [ -z "$cpid" ] && continue
+
+        DETECTED=$((DETECTED + 1))
+        rss=$(rss_of "$cpid")
+        rss=${rss:-0}
+
+        if [ "$DRY" = 1 ]; then
+            RECLAIMED_KB=$((RECLAIMED_KB + rss))
+            continue
+        fi
+
+        tmux kill-session -t "$sname" 2>/dev/null
+        for _ in 1 2 3 4 5; do
+            [ -d "/proc/$cpid" ] || break
+            sleep 1
+        done
+        if [ -d "/proc/$cpid" ]; then
+            kill -TERM "$cpid" 2>/dev/null
+            sleep 2
+            [ -d "/proc/$cpid" ] && kill -KILL "$cpid" 2>/dev/null
+            sleep 1
+        fi
+
+        rm -f "/tmp/tmux-${sname}.pipe" 2>/dev/null
+
+        if [ -d "/proc/$cpid" ]; then
+            FAILED=$((FAILED + 1))
+        else
+            KILLED=$((KILLED + 1))
+            RECLAIMED_KB=$((RECLAIMED_KB + rss))
+        fi
+    done < <(tmux list-sessions -F '#{session_name} #{session_activity}' 2>/dev/null)
+fi
+
+ts=$(date '+%Y-%m-%d %H:%M:%S')
+if [ "$KILLED" -gt 0 ] && [ "$RECLAIMED_KB" -eq 0 ]; then
+    mem_phrase="RAM reclaimed not captured"
+else
+    mem_phrase="$(format_mem "$RECLAIMED_KB") of RAM reclaimed"
+fi
+
+if [ "$DRY" = 1 ]; then
+    # Preview only. Print to stdout; do NOT touch the log. The log is an
+    # audit trail of actions taken, and a dry-run takes none.
+    printf 'DRY-RUN PREVIEW: %d idle sessions detected, would kill %d, would reclaim %s of RAM\n' \
+        "$DETECTED" "$DETECTED" "$(format_mem "$RECLAIMED_KB")"
+else
+    line="$ts  verification executed, $DETECTED idle sessions detected, $KILLED killed, $mem_phrase"
+    [ "$FAILED" -gt 0 ] && line="$line, $FAILED failed"
+    printf '%s\n' "$line" >> "$LOG"
+fi

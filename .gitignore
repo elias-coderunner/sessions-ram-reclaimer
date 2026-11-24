@@ -1,0 +1,15 @@
+# Runtime log (per-install, grows forever, may list session UUIDs)
+activity-log/*
+!activity-log/.gitkeep
+
+# Per-install protection list the /dontkillsession skill writes
+do-not-kill-sessions.json
+
+# Stray logs at the repo root (safety net)
+/*.log
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store

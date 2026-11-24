@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+dont-kill-this-session — write entries to Sessions RAM Reclaimer's do-not-kill-sessions.json.
+
+Called by the /dontkillsession skill after it has figured out exactly what to protect.
+Does not interpret user language; just performs an atomic read-append-write on the file.
+
+Usage:
+  dont-kill-this-session --file <path> [--on-collision replace|extend|keep] --add <json> [--add <json> ...]
+
+Each --add is a JSON object like:
+  {"type": "session", "id": "<uuid>",   "until": "<iso-or-never>", "reason": "..."}
+  {"type": "tmux",    "name": "<name>", "until": "<iso-or-never>", "reason": "..."}
+
+Collision handling (when the same session id or tmux name is already present with an
+unexpired until):
+  replace — new entry wins (default).
+  extend  — the longer of the two untils wins; "never" wins over any timestamp.
+  keep    — existing entry stays, new one is dropped.
+
+Exits 0 on success. Prints a short one-line summary per added entry to stdout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime
+
+
+def parse_until(value: str) -> float | None:
+    """Return a UNIX timestamp for a timezone-aware ISO-8601 string, or None for 'never' / invalid.
+
+    Naive datetimes (no 'Z' and no explicit offset) are rejected on purpose, so there is no
+    ambiguity between the helper's and the reclaimer's interpretation of the same string.
+    """
+    if value == "never":
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.timestamp()
+
+
+def entry_key(e: dict) -> tuple[str, str] | None:
+    t = e.get("type")
+    if t == "session" and e.get("id"):
+        return ("session", str(e["id"]))
+    if t == "tmux" and e.get("name"):
+        return ("tmux", str(e["name"]))
+    return None
+
+
+def is_longer(a_until: str, b_until: str) -> bool:
+    """True if a_until represents a later expiration than b_until."""
+    if a_until == "never":
+        return b_until != "never"
+    if b_until == "never":
+        return False
+    a, b = parse_until(a_until), parse_until(b_until)
+    if a is None or b is None:
+        return False
+    return a > b
+
+
+def lock_path(path: str) -> str:
+    """Path of the lock file that serializes readers/writers of `path`."""
+    return path + ".lock"
+
+
+def acquire_lock(path: str):
+    """Exclusive flock on a sidecar lock file; returns the open fd. Blocks until acquired."""
+    lock_fd = os.open(lock_path(path), os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    return lock_fd
+
+
+def release_lock(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def load_file(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError("top level must be a list")
+        return [e for e in data if isinstance(e, dict)]
+    except Exception as ex:
+        print(f"error: existing {path} could not be parsed ({ex})", file=sys.stderr)
+        sys.exit(2)
+
+
+def write_atomic(path: str, entries: list[dict]) -> None:
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".do-not-kill-sessions.", suffix=".json.tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(entries, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        print(f"error: failed to write {path}", file=sys.stderr)
+        sys.exit(2)
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(add_help=True)
+    p.add_argument("--file", required=True, help="path to do-not-kill-sessions.json")
+    p.add_argument(
+        "--on-collision",
+        choices=("replace", "extend", "keep"),
+        default="replace",
+        help="what to do when an entry with the same session id or tmux name already exists",
+    )
+    p.add_argument("--add", action="append", required=True, help="a JSON entry object; may be repeated")
+    args = p.parse_args()
+
+    # Parse all --add arguments up front to fail fast on bad input before touching the file.
+    new_entries: list[dict] = []
+    for raw in args.add:
+        try:
+            e = json.loads(raw)
+        except Exception as ex:
+            print(f"error: --add value is not valid JSON: {ex}\n  value: {raw}", file=sys.stderr)
+            return 2
+        if not isinstance(e, dict):
+            print(f"error: --add value is not a JSON object: {raw}", file=sys.stderr)
+            return 2
+        key = entry_key(e)
+        if not key:
+            print(f"error: --add entry is missing required type/id or type/name: {raw}", file=sys.stderr)
+            return 2
+        if "until" not in e:
+            print(f"error: --add entry is missing 'until': {raw}", file=sys.stderr)
+            return 2
+        # Validate until if it's not 'never'.
+        if e["until"] != "never" and parse_until(e["until"]) is None:
+            print(f"error: --add entry 'until' is not ISO-8601 or 'never': {e['until']}", file=sys.stderr)
+            return 2
+        new_entries.append(e)
+
+    # Serialize the read-modify-write against the reclaimer's prune and other helper runs.
+    lock_fd = acquire_lock(args.file)
+    try:
+        existing = load_file(args.file)
+        by_key: dict[tuple[str, str], int] = {}
+        for idx, e in enumerate(existing):
+            k = entry_key(e)
+            if k:
+                by_key[k] = idx
+
+        summary: list[str] = []
+        for e in new_entries:
+            key = entry_key(e)
+            label = f"{key[0]}:{key[1]}"
+            if key in by_key:
+                old = existing[by_key[key]]
+                old_until = str(old.get("until", ""))
+                new_until = str(e.get("until", ""))
+                if args.on_collision == "keep":
+                    summary.append(f"skip {label} (already protected until {old_until})")
+                    continue
+                if args.on_collision == "extend":
+                    if is_longer(old_until, new_until):
+                        summary.append(f"kept {label} at {old_until} (was longer than requested {new_until})")
+                        continue
+                existing[by_key[key]] = e
+                summary.append(f"updated {label} → until {new_until}")
+            else:
+                existing.append(e)
+                by_key[key] = len(existing) - 1
+                summary.append(f"added {label} → until {e['until']}")
+
+        write_atomic(args.file, existing)
+    finally:
+        release_lock(lock_fd)
+
+    for line in summary:
+        print(line)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

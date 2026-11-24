@@ -1,0 +1,236 @@
+# Installation instructions
+
+How to install Sessions RAM Reclaimer on a Linux host, step by step. The result is a single `cron` entry that runs the reclaimer on a schedule and reaps idle Claude Code sessions. No secrets, no root access, no daemon — just a script, a cron line, and (optionally) two small system packages.
+
+Takes about five minutes.
+
+> **Platform:** Linux only. Relies on GNU `coreutils` (`stat -c %Y`) and the `/proc` filesystem. Does not work on macOS or BSD as-is.
+
+> **What else ships here:** this install covers the reclaimer itself. The repo also ships an optional Claude Code skill (`/dontkillsession`) that lets you protect sessions from inside Claude for a duration you choose. See the [Companion skill](#companion-skill-optional) section at the end of this document.
+
+
+## Placeholders used in this document
+
+- `<user>` — the Linux user that owns the Claude Code sessions to be reaped (and therefore the user the cron entry runs as).
+- `<install-dir>` — the absolute path where this `sessions-ram-reclaimer/` directory lives on disk.
+
+
+## Prerequisites
+
+The reclaimer is a plain `bash` script. The only runtime dependencies that may not be present on a minimal Linux install are the ones below.
+
+The script also uses `python3` (for parsing the optional `do-not-kill-sessions.json` file). `python3` is pre-installed on Debian/Ubuntu by default; if yours is a stripped-down container image without it, add it to the check and install.
+
+### What you need and why
+
+| Command   | Debian/Ubuntu package | What the reclaimer uses it for |
+| --------- | --------------------- | ------------------------------ |
+| `pstree`  | `psmisc`              | Walks the process tree inside a `tmux` pane to find the `claude` child, during the second-pass tmux reaping. |
+| `tmux`    | `tmux`                | Required for the second pass to exist at all — reaping Claude sessions hosted inside `tmux` (for example, those launched by the `persistentagent` skill). |
+| `python3` | `python3`             | Parses the `do-not-kill-sessions.json` file. Pre-installed on standard Debian/Ubuntu; may be missing on minimal container images. |
+
+Everything else the script uses (`bash`, `ps`, `stat`, `date`, `find`, `printf`, `cron`) is already present on a standard Debian or Ubuntu system.
+
+### Check what you already have
+
+Paste this. It prints the name of anything missing, and nothing at all if your system has all three:
+
+```
+for cmd in pstree tmux python3; do
+  command -v "$cmd" >/dev/null || echo "missing: $cmd"
+done
+```
+
+### Install only what's missing
+
+Map each missing name to its package and install only those:
+
+| Missing       | Package to install |
+| ------------- | ------------------ |
+| `pstree`      | `psmisc`           |
+| `tmux`        | `tmux`             |
+| `python3`     | `python3`          |
+
+E.g. if the check printed `missing: pstree` and `missing: tmux`, run `sudo apt install psmisc tmux`. If it printed nothing, skip this step.
+
+### Access and permissions
+
+- The reclaimer must run as **the same Linux user that owns the Claude Code sessions**. Detection reads `/proc/<pid>`; termination sends signals. Both need matching UID.
+- No root required.
+- No secrets file — the tool does not authenticate to anything. Everything it needs is local.
+- The install directory must be writable by `<user>`, because the log file (`activity-log/sessions-ram-reclaimer.log`) lands there by default.
+
+
+## Step 1: Place the files
+
+Clone the repository into a stable path on disk, owned by `<user>`. That path is `<install-dir>` throughout the rest of this document.
+
+```
+git clone https://github.com/elias-coderunner/sessions-ram-reclaimer.git <install-dir>
+```
+
+Make the script executable:
+
+```
+chmod +x <install-dir>/sessions-ram-reclaimer
+```
+
+Confirm it runs on a fresh install:
+
+```
+<install-dir>/sessions-ram-reclaimer
+tail -1 <install-dir>/activity-log/sessions-ram-reclaimer.log
+```
+
+On a fresh install with no idle sessions, you'll see a line like:
+
+```
+2026-11-24 19:03:53  verification executed, 0 idle sessions detected, 0 killed, 0 MB of RAM reclaimed
+```
+
+That is the expected baseline — the plumbing works; the first real idle session will be reaped on the next run.
+
+
+## Step 2: (Optional) Customize
+
+The reclaimer reads seven environment variables. All have sensible defaults, so this entire step is optional — skip it to run on defaults.
+
+| Variable                | Default                                | What it does                                                                                           |
+| ----------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `IDLE_THRESHOLD`        | `21600` (6 hours, in seconds)          | How long a session must sit untouched before it is eligible for reaping.                               |
+| `SKIP_SESSIONS`         | *empty*                                | Comma-separated Claude session UUIDs that must never be killed.                                        |
+| `SKIP_TMUX`             | *empty*                                | Comma-separated `tmux` session names that must never be killed.                                        |
+| `LOG`                   | `<install-dir>/activity-log/sessions-ram-reclaimer.log` | Where the per-run summary line is appended.                                                            |
+| `CLAUDE_PROJECTS_DIR`   | `$HOME/.claude/projects`               | Where Claude Code keeps session transcripts. Override only if yours live somewhere else.               |
+| `DO_NOT_KILL_FILE`      | `<install-dir>/do-not-kill-sessions.json` | JSON file of sessions to protect. Populated by the `/dontkillsession` skill, or edited by hand. Override to share one exclusion list across multiple installs. |
+| `DRY_RUN`               | *unset*                                | Set to `1` for an ad-hoc preview run that reports what *would* be reaped without killing anything. Not for cron; use at the shell. |
+
+Where to put overrides: either **inline in the cron line** (see Step 3), or in a small **wrapper script** next to the reclaimer that exports the variables and then `exec`s the script. Inline is simpler for one or two overrides; a wrapper is cleaner for several.
+
+
+## Step 3: Install the cron entry
+
+The reclaimer is a one-shot script. It is driven by `cron`, not `systemd` — there is no daemon to manage.
+
+Open `<user>`'s crontab:
+
+```
+crontab -e
+```
+
+Add one line. The default is **hourly, at minute 0**:
+
+```
+0 * * * * <install-dir>/sessions-ram-reclaimer
+```
+
+To use a different frequency, change the cron expression. A few examples:
+
+- Every 15 minutes: `*/15 * * * *`
+- Every 6 hours: `0 */6 * * *`
+- Once a day at 04:00: `0 4 * * *`
+
+Pick a frequency that is small relative to `IDLE_THRESHOLD`. Hourly is a good match for the default 6-hour threshold; running more often than that is harmless but gives no additional benefit.
+
+If you want to pass overrides from Step 2 inline, extend the line:
+
+```
+0 * * * * IDLE_THRESHOLD=43200 SKIP_TMUX=persistent-main <install-dir>/sessions-ram-reclaimer
+```
+
+The cron entry must belong to `<user>` — see the Access and permissions note above.
+
+
+## Step 4: Verify
+
+Three commands, in this order.
+
+Dry-run — see what would be reaped right now without killing anything:
+
+```
+DRY_RUN=1 <install-dir>/sessions-ram-reclaimer
+```
+
+Real run — the same reaping the cron job will do at its next tick:
+
+```
+<install-dir>/sessions-ram-reclaimer
+```
+
+Check the log:
+
+```
+tail -5 <install-dir>/activity-log/sessions-ram-reclaimer.log
+```
+
+You should see lines like:
+
+```
+2026-11-24 19:03:53  verification executed, 2 idle sessions detected, 2 killed, 531 MB of RAM reclaimed
+```
+
+Fields:
+
+- **verification executed** — a real run (dry-runs print to the terminal only, nothing to log).
+- **N idle sessions detected** — how many sessions crossed `IDLE_THRESHOLD`.
+- **N killed** — how many were actually terminated.
+- **X MB of RAM reclaimed** — total resident memory freed. Replaced by `RAM reclaimed not captured` in the rare case where sessions were killed but `/proc/<pid>/status` couldn't be read in time to measure their RSS.
+- **N failed** (appears only if non-zero) — how many the kill signal didn't successfully terminate.
+
+Additional log lines that may appear on runs that touch `do-not-kill-sessions.json`:
+
+- `pruned N expired/malformed entry(ies) from <path>` — the reclaimer removed stale entries from the do-not-kill file. Informational, not an error.
+- `do-not-kill-sessions file <path> could not be parsed, ignoring` — the file is unreadable or not valid JSON. The reclaimer continues using only the env-var protection lists. Fix the file or delete it.
+
+
+## When something goes wrong
+
+- **Cron doesn't fire** — confirm the cron daemon is running (`systemctl status cron` or `systemctl status crond`), and that `crontab -l` as `<user>` shows the entry you added.
+- **Script runs but reaps nothing, ever** — likely `CLAUDE_PROJECTS_DIR` points at the wrong directory, or `IDLE_THRESHOLD` is too large for your usage. Run with `DRY_RUN=1` and inspect; add `set -x` temporarily if you need visibility.
+- **`N failed` stays non-zero every run** — the kill signal isn't reaching the target process. Most common cause: cron is running the script as a user that does not own the Claude processes (so `kill` is permission-denied). Confirm with `ps -o user= -p <pid>` versus `whoami` inside the cron environment.
+- **First pass works, second pass (tmux) reaps nothing** — `tmux` isn't installed, or the `tmux` server is running under a different user than the reclaimer. Re-run the Prerequisites check.
+- **First pass works, second pass reaps less than expected** — `pstree` (`psmisc`) isn't installed, so the script falls back to the bare pane PID and may miss `claude` processes nested deeper in the pane's process tree. Install `psmisc`.
+- **Log grows unbounded** — the reclaimer does not rotate its own log. Pipe it through `logrotate`, or set `LOG` to a destination that handles rotation on its own.
+
+
+## Companion skill (optional)
+
+This repository ships with a Claude Code skill named `dontkillsession` (folder: `./dontkillsession/`). The skill lets a user mark the Claude Code session they are currently in — or any set of sessions — as protected from reaping, for a duration they choose. It writes exclusions to `do-not-kill-sessions.json` in the reclaimer's install directory; the reclaimer reads the file on each run.
+
+Installing the skill is not just a copy — it requires a one-time setup step that writes the install path and the user's timezone into `~/.config/sessions-ram-reclaimer/`. See the skill's own guide for the full procedure:
+
+```
+<install-dir>/dontkillsession/installation-instructions
+```
+
+The reclaimer works fine without the skill — the skill is a convenience layer, not a requirement. Protecting sessions without the skill is done via `SKIP_SESSIONS`, `SKIP_TMUX`, or by hand-editing `do-not-kill-sessions.json` in the install directory.
+
+
+## Uninstall
+
+Remove the cron line:
+
+```
+crontab -e    # delete the sessions-ram-reclaimer line
+```
+
+Remove the install directory:
+
+```
+rm -rf <install-dir>
+```
+
+If the skill was installed, remove it and its config:
+
+```
+rm -rf ~/.claude/skills/dontkillsession
+rm -rf ~/.config/sessions-ram-reclaimer
+```
+
+Confirm no leftover processes (will be empty unless the reclaimer happens to be running right now — it is a short-lived cron script):
+
+```
+ps -ef | grep sessions-ram-reclaimer | grep -v grep
+```
+
+The reclaimer itself creates no files outside `<install-dir>`. The skill, if installed, adds files under `~/.claude/skills/dontkillsession/` and `~/.config/sessions-ram-reclaimer/`, which the commands above clean up.

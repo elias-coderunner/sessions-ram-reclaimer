@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# One-time interactive setup for the /dontkillsession skill.
+# Writes the install path and the user's timezone to ~/.config/sessions-ram-reclaimer/.
+
+set -uo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/sessions-ram-reclaimer"
+PATH_FILE="$CONFIG_DIR/path"
+TZ_FILE="$CONFIG_DIR/timezone"
+
+mkdir -p "$CONFIG_DIR"
+
+echo "Sessions RAM Reclaimer — /dontkillsession skill setup"
+echo
+
+# ---- Find a sensible default install path ----
+# Default the install path to this script's parent directory, but only when that
+# directory actually contains the reclaimer executable. Otherwise offer no default
+# (e.g. when the skill lives under ~/.claude/skills/ and the reclaimer is elsewhere).
+sibling=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || echo "")
+if [ -n "$sibling" ] && [ -x "$sibling/sessions-ram-reclaimer" ]; then
+    DEFAULT_INSTALL="$sibling"
+else
+    DEFAULT_INSTALL=""
+fi
+
+# ---- Install path ----
+echo "Where is Sessions RAM Reclaimer installed on this machine?"
+if [ -n "$DEFAULT_INSTALL" ]; then
+    echo "Press Enter to accept the default:  $DEFAULT_INSTALL"
+fi
+if ! read -r -p "> " install_path; then
+    echo
+    echo "aborted (nothing saved)."
+    exit 1
+fi
+install_path=${install_path:-$DEFAULT_INSTALL}
+# Strip surrounding whitespace.
+install_path="${install_path#"${install_path%%[![:space:]]*}"}"
+install_path="${install_path%"${install_path##*[![:space:]]}"}"
+
+if [ -z "$install_path" ]; then
+    echo "aborted: no install path given."
+    exit 1
+fi
+
+if [ ! -x "$install_path/sessions-ram-reclaimer" ]; then
+    echo
+    echo "warning: no executable 'sessions-ram-reclaimer' found at $install_path"
+    echo "         The skill will not be able to protect sessions until the path is correct."
+    if ! read -r -p "Save it anyway? [y/N] " confirm; then
+        echo; echo "aborted."; exit 1
+    fi
+    case "${confirm:-n}" in
+        y|Y|yes|YES) ;;
+        *) echo "aborted."; exit 1 ;;
+    esac
+fi
+
+# ---- Timezone ----
+# Prefer timedatectl, which returns an IANA name ('Europe/Lisbon'). Fall back to
+# $TZ if it is set to an IANA name; otherwise leave the default empty. A timezone
+# abbreviation like 'UTC' or 'WET' is never written as if it were an IANA name.
+default_tz=""
+if command -v timedatectl >/dev/null 2>&1; then
+    default_tz=$(timedatectl show -p Timezone --value 2>/dev/null || echo "")
+fi
+if [ -z "$default_tz" ] && [ -n "${TZ:-}" ] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
+    default_tz="$TZ"
+fi
+
+echo
+echo "What is your local timezone? Used to interpret 'today' and 'this week'."
+echo "Use an IANA name like 'Europe/Lisbon' or 'America/New_York'."
+if [ -n "$default_tz" ]; then
+    echo "Press Enter to use this machine's timezone:  $default_tz"
+else
+    echo "Press Enter to skip (the skill will fall back to the machine's timezone each run)."
+fi
+if ! read -r -p "> " user_tz; then
+    echo
+    echo "aborted before saving timezone (install path WAS saved)."
+    exit 1
+fi
+# Strip whitespace.
+user_tz="${user_tz#"${user_tz%%[![:space:]]*}"}"
+user_tz="${user_tz%"${user_tz##*[![:space:]]}"}"
+
+# Decide the final value. Validate anything to be saved against /usr/share/zoneinfo/.
+final_tz=""
+if [ -n "$user_tz" ]; then
+    if [ -f "/usr/share/zoneinfo/$user_tz" ]; then
+        final_tz="$user_tz"
+    else
+        echo "error: '$user_tz' is not a valid IANA timezone (no /usr/share/zoneinfo/$user_tz)."
+        echo "       Nothing saved for timezone. Re-run setup to try again."
+        # Fall through: install path already written; leave tz unset.
+    fi
+elif [ -n "$default_tz" ] && [ -f "/usr/share/zoneinfo/$default_tz" ]; then
+    final_tz="$default_tz"
+fi
+
+# ---- Atomic write: both files at once if possible. ----
+# Write install path first (validated or warned about above).
+printf '%s\n' "$install_path" > "$PATH_FILE.tmp" && mv "$PATH_FILE.tmp" "$PATH_FILE"
+echo "saved: $PATH_FILE"
+
+if [ -n "$final_tz" ]; then
+    printf '%s\n' "$final_tz" > "$TZ_FILE.tmp" && mv "$TZ_FILE.tmp" "$TZ_FILE"
+    echo "saved: $TZ_FILE"
+else
+    rm -f "$TZ_FILE"
+    echo "no timezone saved; the skill will read the machine's timezone each run."
+fi
+
+echo
+echo "done. The /dontkillsession skill is ready."
